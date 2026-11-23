@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>向量检索引擎 · HNSW + PQ + 过滤策略</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a212b; --panel2: #232d3b; --line: #2e3b4e;
+    --text: #e6edf3; --muted: #8b98a9; --accent: #4ea1ff; --accent2: #59d29b;
+    --warn: #ffb454; --danger: #ff6b6b; --purple: #b48ef6;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:18px 28px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .stat { font-size:12px; color:var(--muted); }
+  header .stat b { color:var(--accent2); font-size:15px; }
+  .tabs { display:flex; gap:4px; padding:0 28px; background:var(--panel); border-bottom:1px solid var(--line); }
+  .tabs button { background:none; border:none; color:var(--muted); padding:12px 20px;
+    cursor:pointer; font-size:14px; border-bottom:2px solid transparent; }
+  .tabs button.active { color:var(--accent); border-bottom-color:var(--accent); }
+  main { padding:24px 28px; max-width:1400px; margin:0 auto; }
+  .view { display:none; } .view.active { display:block; }
+  .grid { display:grid; gap:16px; }
+  .grid.cols2 { grid-template-columns:1fr 1fr; }
+  .grid.cols3 { grid-template-columns:repeat(3,1fr); }
+  @media (max-width:1000px){ .grid.cols2,.grid.cols3{grid-template-columns:1fr;} }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  .card h3 { margin:0 0 14px; font-size:14px; color:var(--muted); font-weight:600;
+    text-transform:uppercase; letter-spacing:.5px; }
+  .metric { font-size:28px; font-weight:700; }
+  .metric small { font-size:13px; color:var(--muted); font-weight:400; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { padding:8px 10px; text-align:right; border-bottom:1px solid var(--line); }
+  th:first-child,td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:500; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; }
+  .tag.graph_filtered { background:#1d3a5f; color:var(--accent); }
+  .tag.graph_relaxed { background:#3d2f16; color:var(--warn); }
+  .tag.brute_force { background:#3d1d1d; color:var(--danger); }
+  .tag.none { background:#1e3a2f; color:var(--accent2); }
+  select,button,input { background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:6px; padding:7px 10px; font-size:13px; }
+  button.primary { background:var(--accent); color:#06121f; border:none; cursor:pointer; font-weight:600; }
+  button.primary:hover { filter:brightness(1.1); }
+  .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px; }
+  .controls label { color:var(--muted); font-size:12px; display:flex; flex-direction:column; gap:4px; }
+  svg { width:100%; height:auto; display:block; }
+  .axis text { fill:var(--muted); font-size:11px; }
+  .axis line,.axis path { stroke:var(--line); }
+  .legend { display:flex; gap:16px; margin-top:10px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
+  .path-wrap { max-height:520px; overflow:auto; background:var(--bg); border-radius:8px; padding:10px; }
+  .layer-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+  .layer-label { width:64px; color:var(--purple); font-size:12px; }
+  .node-dot { width:30px; height:30px; border-radius:50%; display:flex; align-items:center;
+    justify-content:center; font-size:10px; border:2px solid var(--accent); cursor:default; }
+  .node-dot.filtered { border-color:var(--danger); color:var(--danger); opacity:.75; }
+  .node-dot.entry { border-color:var(--warn); }
+  .node-dot.result { background:var(--accent2); color:#06121f; border-color:var(--accent2); font-weight:700; }
+  .arrow { color:var(--muted); }
+  .muted { color:var(--muted); }
+  .bar-row { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .bar-row .name { width:130px; font-size:12px; color:var(--muted); }
+  .bar-track { flex:1; height:22px; background:var(--panel2); border-radius:4px; overflow:hidden; position:relative; }
+  .bar-fill { height:100%; background:var(--accent); display:flex; align-items:center;
+    padding-left:8px; font-size:11px; color:#06121f; font-weight:600; white-space:nowrap; }
+  .bar-fill.green { background:var(--accent2); }
+  .bar-fill.warn { background:var(--warn); }
+  .bar-fill.red { background:var(--danger); }
+  code { background:var(--panel2); padding:2px 6px; border-radius:4px; font-size:12px; }
+  .pill { font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔍 向量检索引擎</h1>
+  <span class="stat">数据量 <b id="h-n">-</b></span>
+  <span class="stat">维度 <b id="h-dim">-</b></span>
+  <span class="stat">构建耗时 <b id="h-build">-</b></span>
+  <span class="stat">堆内存 <b id="h-heap">-</b></span>
+  <span class="stat">PQ 编码 <b id="h-pq">-</b></span>
+</header>
+<nav class="tabs">
+  <button data-view="dashboard" class="active">验收总览</button>
+  <button data-view="curves">召回 / 时延曲线</button>
+  <button data-view="strategies">过滤策略</button>
+  <button data-view="explorer">查询与搜索路径</button>
+</nav>
+<main>
+  <!-- 总览 -->
+  <section id="view-dashboard" class="view active">
+    <div class="grid cols3" id="kpi-row"></div>
+    <div class="grid cols2" style="margin-top:16px">
+      <div class="card"><h3>各选择率档位召回率 (exact)</h3><div id="sel-recall"></div></div>
+      <div class="card"><h3>各选择率档位 P95 时延</h3><div id="sel-lat"></div></div>
+    </div>
+    <div class="grid cols2" style="margin-top:16px">
+      <div class="card"><h3>压缩前后召回对比</h3><div id="pq-compare"></div></div>
+      <div class="card"><h3>删除 + 局部修复后召回变化</h3><div id="del-sweep"></div></div>
+    </div>
+  </section>
+
+  <!-- 曲线 -->
+  <section id="view-curves" class="view">
+    <div class="card"><h3>ef 参数: 召回率与时延权衡 (无过滤, exact)</h3>
+      <div id="ef-chart"></div><div class="legend" id="ef-legend"></div></div>
+    <div class="card" style="margin-top:16px"><h3>删除比例 sweep 曲线</h3>
+      <div id="del-chart"></div><div class="legend" id="del-legend"></div></div>
+  </section>
+
+  <!-- 策略 -->
+  <section id="view-strategies" class="view">
+    <div class="card"><h3>不同选择率下选用的检索策略与实测表现</h3>
+      <table id="strat-table"><thead><tr>
+        <th>选择率档位</th><th>选择率</th><th>策略分布</th>
+        <th>召回率</th><th>P50 时延</th><th>P95 时延</th><th>平均访问节点</th>
+      </tr></thead><tbody></tbody></table></div>
+    <div class="card" style="margin-top:16px"><h3>策略选择逻辑</h3>
+      <p class="muted">选择率由倒排表精确基数 + 数值列分位数估计, 阈值可在构建参数中调整:</p>
+      <p><span class="tag graph_filtered">graph_filtered</span> 选择率 &gt; 5%:
+        图搜索中跳过不满足的节点, 但仍然经过它们继续走, 连通性不受影响。</p>
+      <p><span class="tag graph_relaxed">graph_relaxed</span> 0.5% ~ 5%:
+        放大候选队列 ef×4 对抗命中稀释; 图结果不足 K 时用倒排枚举子集补搜。</p>
+      <p><span class="tag brute_force">brute_force</span> 选择率 ≤ 0.5%:
+        直接在满足条件的子集上暴力(倒排交集枚举), 避免图搜索的空转开销。</p>
+    </div>
+  </section>
+
+  <!-- 查询浏览器 -->
+  <section id="view-explorer" class="view">
+    <div class="card">
+      <div class="controls">
+        <label>仿真查询 #<input type="number" id="q-id" value="0" min="0" style="width:90px"></label>
+        <label>K<input type="number" id="q-k" value="10" style="width:70px"></label>
+        <label>ef<input type="number" id="q-ef" value="64" style="width:80px"></label>
+        <label>距离模式
+          <select id="q-mode"><option value="exact">exact 精确</option>
+            <option value="hybrid_pq">hybrid_pq (默认压缩)</option>
+            <option value="full_pq">full_pq 全压缩导航</option></select></label>
+        <label>过滤条件<select id="q-filter"><option value="">无过滤</option></select></label>
+        <label style="justify-content:flex-end">追踪路径
+          <input type="checkbox" id="q-track" checked style="width:auto"></label>
+        <button class="primary" id="q-run">执行查询</button>
+      </div>
+      <div id="q-meta" class="muted" style="margin-bottom:12px"></div>
+      <div class="grid cols2">
+        <div><h3 style="color:var(--muted);font-size:13px">Top 命中</h3>
+          <table id="q-hits"><thead><tr><th>ID</th><th>距离</th><th>租户</th><th>类目</th></tr></thead><tbody></tbody></table>
+        </div>
+        <div><h3 style="color:var(--muted);font-size:13px">图搜索路径 (按层)</h3>
+          <div class="path-wrap" id="q-path"><span class="muted">执行查询后展示</span></div></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
