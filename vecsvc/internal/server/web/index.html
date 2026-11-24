@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vecsvc · 向量检索服务观测台</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2330; --border: #2d3748;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4493f8; --green: #3fb950;
+    --amber: #d29922; --red: #f85149; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:var(--panel); }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .wrap { padding:20px 24px; max-width:1500px; margin:0 auto; }
+  .grid { display:grid; gap:16px; }
+  .cols-2 { grid-template-columns: repeat(auto-fit, minmax(420px,1fr)); }
+  .cols-3 { grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .card h2 { font-size:14px; margin:0 0 12px; color:var(--accent); letter-spacing:.3px; }
+  .card h3 { font-size:13px; margin:14px 0 8px; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { padding:6px 8px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th:first-child,td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:600; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+  .tag.graph { background:rgba(68,147,248,.18); color:#7cb7ff; }
+  .tag.hybrid { background:rgba(210,153,34,.18); color:#e3b341; }
+  .tag.brute { background:rgba(248,81,73,.18); color:#ff7b72; }
+  .metric { font-size:24px; font-weight:700; }
+  .metric small { font-size:12px; color:var(--muted); font-weight:400; }
+  .muted { color:var(--muted); }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px;
+    padding:8px 16px; font-size:13px; cursor:pointer; font-weight:600; }
+  button:hover { filter:brightness(1.1); }
+  button.secondary { background:var(--panel2); border:1px solid var(--border); }
+  select,input { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:6px 8px; font-size:13px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  canvas { width:100%; height:260px; display:block; }
+  #pathSvg { width:100%; height:340px; background:var(--bg); border-radius:8px; border:1px solid var(--border); }
+  .legend { display:flex; gap:14px; font-size:11.5px; color:var(--muted); margin-top:6px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  pre { background:var(--bg); border:1px solid var(--border); border-radius:8px;
+    padding:10px; overflow:auto; font-size:11.5px; max-height:280px; }
+  .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:var(--panel2);
+    border:1px solid var(--border); color:var(--muted); }
+  .ok { color:var(--green); } .warn { color:var(--amber); } .bad { color:var(--red); }
+  .status { font-size:12px; color:var(--muted); }
+  .bar { height:8px; border-radius:4px; background:var(--panel2); overflow:hidden; min-width:60px; display:inline-block; width:100px; vertical-align:middle; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔍 vecsvc 观测台</h1>
+  <span class="sub">分层近邻图 HNSW · 乘积量化 PQ · 过滤策略自适应</span>
+  <span style="flex:1"></span>
+  <span class="pill" id="statsPill">加载索引状态…</span>
+  <button class="secondary" onclick="loadStats()">刷新状态</button>
+</header>
+
+<div class="wrap">
+
+  <!-- 索引总览 -->
+  <div class="grid cols-3" style="margin-bottom:16px">
+    <div class="card"><h2>索引规模</h2><div class="metric" id="mNodes">–</div>
+      <div class="muted" id="mNodesSub">live / total 节点 · 顶层 · 平均底层度</div></div>
+    <div class="card"><h2>内存占用</h2><div class="metric" id="mMem">–</div>
+      <div class="muted" id="mMemSub">堆内存 · 原始向量 vs PQ 编码</div></div>
+    <div class="card"><h2>PQ 压缩</h2><div class="metric" id="mPQ">–</div>
+      <div class="muted" id="mPQSub">压缩倍率与编码字节数</div></div>
+  </div>
+
+  <!-- 基准报告区 -->
+  <div class="card" style="margin-bottom:16px">
+    <h2>验收基准（与暴力真实近邻对比）</h2>
+    <div class="row" style="margin-bottom:12px">
+      <label>规模 N <input id="benchN" type="number" value="50000" style="width:110px"></label>
+      <label>每档查询数 <input id="benchQ" type="number" value="40" style="width:90px"></label>
+      <label>PQ 子空间 <input id="benchPQ" type="number" value="16" style="width:70px"></label>
+      <label>删除比例 <input id="benchDel" type="number" value="0.3" step="0.05" style="width:80px"></label>
+      <button onclick="runBench()">运行基准（耗时较长）</button>
+      <button class="secondary" onclick="loadReport()">读取已有报告</button>
+      <span class="status" id="benchStatus"></span>
+    </div>
+    <div id="reportArea" class="muted">尚未运行。CLI 也可执行 <code>vecsvc bench -out report.json</code> 后把报告放到服务端。</div>
+  </div>
+
+  <div id="reportBlocks" style="display:none">
+    <!-- 曲线 -->
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><h2>召回率 vs 过滤选择率</h2><canvas id="recallChart"></canvas>
+        <div class="legend"><span><i class="dot" style="background:var(--accent)"></i>精确距离召回</span>
+        <span><i class="dot" style="background:var(--purple)"></i>PQ 粗排+精排召回</span></div></div>
+      <div class="card"><h2>查询时延 vs 过滤选择率（P50, µs）</h2><canvas id="latencyChart"></canvas>
+        <div class="legend"><span><i class="dot" style="background:var(--green)"></i>精确距离</span>
+        <span><i class="dot" style="background:var(--amber)"></i>PQ 遍历</span></div></div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><h2>ef 候选队列大小：召回/时延取舍（无过滤）</h2><canvas id="efChart"></canvas>
+        <div class="legend"><span><i class="dot" style="background:var(--accent)"></i>召回率（左）</span>
+        <span><i class="dot" style="background:var(--red)"></i>P50 时延 µs（右）</span></div></div>
+      <div class="card"><h2>各选择率档位明细与选用策略</h2>
+        <table id="caseTable"><thead><tr>
+          <th>档位</th><th>选择率</th><th>策略</th><th>召回</th><th>PQ召回</th>
+          <th>P50 µs</th><th>P99 µs</th><th>平均访问</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><h2>构建与压缩成本</h2><div id="buildInfo"></div></div>
+      <div class="card"><h2>大量删除 + 图局部修复</h2><div id="deleteInfo"></div></div>
+    </div>
+  </div>
+
+  <!-- 交互式查询与搜索路径 -->
+  <div class="grid cols-2">
+    <div class="card">
+      <h2>单次查询调试</h2>
+      <div class="row" style="margin-bottom:10px">
+        <label>过滤档位 <select id="filterSel"></select></label>
+        <label>ef <input id="qEf" type="number" value="64" style="width:70px"></label>
+        <label>k <input id="qK" type="number" value="10" style="width:60px"></label>
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <label><input type="checkbox" id="qPQ"> PQ 粗排 + 原始精排</label>
+        <label><input type="checkbox" id="qPath" checked> 记录搜索路径</label>
+        <label>随机种子 <input id="qSeed" type="number" value="7" style="width:90px"></label>
+        <button onclick="runSearch()">执行查询</button>
+      </div>
+      <div id="strategyBox" class="muted"></div>
+      <h3>返回结果（id / 距离 / 租户 / 类目）</h3>
+      <table id="resultTable"><thead><tr><th>#</th><th>id</th><th>L2²距离</th><th>租户</th><th>类目</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>图上的搜索路径</h2>
+      <svg id="pathSvg"></svg>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--green)"></i>满足过滤</span>
+        <span><i class="dot" style="background:var(--red)"></i>不满足但被经过（路由节点）</span>
+        <span><i class="dot" style="background:var(--accent)"></i>顶层入口</span>
+        <span>纵轴 = 图层级，横轴 = 访问顺序</span>
+      </div>
+      <h3>路径 JSON（前 60 步）</h3><pre id="pathJSON">执行一次查询后展示</pre>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
